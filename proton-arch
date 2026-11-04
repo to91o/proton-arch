@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Arch integration for the unmodified upstream Proton VPN desktop app.
+set -euo pipefail
+
+require_arch() {
+    if [[ ! -r /etc/arch-release ]] || ! command -v pacman >/dev/null; then
+        echo 'This command requires Arch Linux and pacman.' >&2
+        exit 1
+    fi
+}
+
+doctor() {
+    local failed=0
+    require_arch
+    for package in proton-vpn-gtk-app proton-vpn-daemon networkmanager; do
+        if ! pacman -Q "$package"; then failed=1; fi
+    done
+    if ! systemctl is-active --quiet NetworkManager; then
+        echo 'FAIL: NetworkManager is not running.' >&2
+        failed=1
+    fi
+    if ! systemctl is-active --quiet proton.VPN.service; then
+        echo 'FAIL: Proton VPN daemon is not running; check systemctl status proton.VPN.service.' >&2
+        failed=1
+    fi
+    if [[ -z ${DISPLAY:-} && -z ${WAYLAND_DISPLAY:-} ]]; then
+        echo 'FAIL: run in a graphical desktop session.' >&2
+        failed=1
+    fi
+    if ! busctl --user --timeout=5 call org.freedesktop.secrets /org/freedesktop/secrets org.freedesktop.DBus.Peer Ping; then
+        echo 'FAIL: no usable Secret Service; configure/unlock your desktop keyring.' >&2
+        failed=1
+    fi
+    if ! python -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("NM", "1.0"); from gi.repository import Gtk, NM; from proton.vpn.app.gtk.app import App'; then
+        echo 'FAIL: Proton app or GTK/NetworkManager bindings cannot load.' >&2
+        failed=1
+    fi
+    if (( failed )); then return 1; fi
+    echo 'Desktop prerequisites passed. Login and a real VPN connection still need verification.'
+}
+
+case ${1:-help} in
+    install)
+        require_arch
+        if (( EUID == 0 )); then privilege=(); else privilege=(sudo); fi
+        # A full upgrade is required: Arch does not support partial upgrades.
+        "${privilege[@]}" pacman -Syu --needed proton-vpn-gtk-app networkmanager gnome-keyring
+        echo 'Installed. Ensure NetworkManager manages your connection before enabling it.'
+        echo 'In your desktop session, run ./proton-arch doctor then ./proton-arch launch.'
+        ;;
+    doctor) doctor ;;
+    launch)
+        require_arch
+        if (( EUID == 0 )); then
+            echo 'Launch as your normal desktop user, without sudo.' >&2
+            exit 1
+        fi
+        doctor
+        exec protonvpn-app
+        ;;
+    help|--help|-h)
+        echo 'Usage: proton-arch {install|doctor|launch}'
+        ;;
+    *) echo "Unknown command: $1" >&2; exit 2 ;;
+esac
